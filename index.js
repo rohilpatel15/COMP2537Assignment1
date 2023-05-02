@@ -12,7 +12,7 @@ const app = express();
 
 const port = process.env.PORT || 3020;
 
-const timeExpired = 1 * 60 * 60 * 1000;
+const expireTime = 1 * 60 * 60 * 1000;
 
 const mongodb_host = process.env.MONGODB_HOST;
 const mongodb_user = process.env.MONGODB_USER;
@@ -25,6 +25,13 @@ const node_session_secret = process.env.NODE_SESSION_SECRET;
 var {database} = require('./databaseConnection');
 
 const userCollection = database.db(mongodb_database).collection('users');
+
+const images = [
+	'/cr7.gif',
+	'/lebronMeme.png',
+	'/tooEasy.gif',
+  ];
+  
 
 app.use(express.urlencoded({extended: false}));
 
@@ -95,8 +102,9 @@ app.get('/nosql-injection', async (req,res) => {
 app.get('/createUser', (req,res) => {
     var html = `
     create user
-    <form action='/submitUser' method='post'>
+	<form action='/submitUser' method='post'>
     <input name='username' type='text' placeholder='username'>
+    <input name='email' type='email' placeholder='email'>
     <input name='password' type='password' placeholder='password'>
     <button>Submit</button>
     </form>
@@ -109,7 +117,7 @@ app.get('/login', (req,res) => {
     var html = `
     log in
     <form action='/loggingin' method='post'>
-    <input name='username' type='text' placeholder='username'>
+    <input name='email' type='text' placeholder='email'>
     <input name='password' type='password' placeholder='password'>
     <button>Submit</button>
     </form>
@@ -119,39 +127,44 @@ app.get('/login', (req,res) => {
 
 app.post('/submitUser', async (req,res) => {
     var username = req.body.username;
+    var email = req.body.email;
     var password = req.body.password;
 
-	const schema = Joi.object(
-		{
-			username: Joi.string().alphanum().max(20).required(),
-			password: Joi.string().max(20).required()
-		});
-	
-	const validationResult = schema.validate({username, password});
-
-	if (validationResult.error != null) {
-	   console.log(validationResult.error);
-	   res.redirect("/createUser");
-	   return;
-   }
+	const schema = Joi.string().max(20).required();
+	const validationResult = schema.validate(username);
+    if (validationResult.error != null) {
+        console.log(validationResult.error);
+        res.redirect('/signup?error=invalid');
+        return;
+    }
 
     var hashedPassword = await bcrypt.hash(password, saltRounds);
-	
-	await userCollection.insertOne({username: username, password: hashedPassword});
-	console.log("Inserted user");
 
+    await userCollection.insertOne({username: username, email: email, password: hashedPassword});
+    console.log("Inserted user");
+
+    req.session.authenticated = true;
     req.session.username = username;
+    req.session.cookie.maxAge = expireTime;
 
     res.redirect('/members');
 });
 
+
 app.get('/members', (req, res) => {
-    if (!req.session.username) {
-        res.redirect('/login');
+    if (!req.session.authenticated) {
+        res.redirect('/');
+        return;
     }
+
+	const randomNumber = Math.floor(Math.random() * images.length);
+
+	const imageUrl = images[randomNumber];
+
     var html = `
         <h1>Welcome, ${req.session.username}!</h1>
         <p>You are now a member of our site.</p>
+		<img src="${imageUrl}">
 		<form action="/logout" method="post">
             <button type="submit">Log Out</button>
         </form>
@@ -161,40 +174,54 @@ app.get('/members', (req, res) => {
 
 
 app.post('/loggingin', async (req,res) => {
-    var username = req.body.username;
+    var email = req.body.email;
     var password = req.body.password;
 
-	const schema = Joi.string().max(20).required();
-	const validationResult = schema.validate(username);
+    const validationResult = Joi.string().email().required().validate(email);
+    if (validationResult.error != null) {
+        console.log(validationResult.error);
+        var html = `
+            <h1>Validation Error</h1>
+            <p>${validationResult.error.details[0].message}</p>
+            <a href="/login">Try again</a>
+        `;
+        res.send(html);
+        return;
+    }
 
-	if (validationResult.error != null) {
-	   console.log(validationResult.error);
-	   res.redirect("/login");
-	   return;
-	}
+    const user = await userCollection.findOne({ email: email });
 
-	const result = await userCollection.find({username: username}).project({username: 1, password: 1, _id: 1}).toArray();
+    if (!user) {
+		var html = `
+		<h1>Invalid Login</h1>
+		<p>User not found</p>
+		<a href="/login">Try again</a>
+	`;
+	res.send(html);
+        return;
+    }
 
-	if (result.length != 1) {
-		console.log("user not found");
-		res.redirect("/login");
-		return;
-	}
+    if (await bcrypt.compare(password, user.password)) {
+        console.log("correct password");
+        req.session.authenticated = true;
+        req.session.username = user.username;
+        req.session.cookie.maxAge = expireTime;
 
-	if (await bcrypt.compare(password, result[0].password)) {
-		console.log("correct password");
-
-		req.session.username = username;
-
-		res.redirect('/members');
-		return;
-	}
-	else {
-		console.log("incorrect password");
-		res.redirect("/login");
-		return;
-	}
+        res.redirect('/members');
+        return;
+    } else {
+        console.log("incorrect password");
+        var html = `
+            <h1>Invalid Login</h1>
+            <p>Incorrect password</p>
+            <a href="/login">Try again</a>
+        `;
+        res.send(html);
+        return;
+    }
 });
+
+
 
 app.get('/loggedin', (req,res) => {
     if (!req.session.authenticated) {
@@ -216,24 +243,6 @@ app.post('/logout', (req, res) => {
         });
     });
 });
-
-
-
-app.get('/cat/:id', (req,res) => {
-
-    var cat = req.params.id;
-
-    if (cat == 1) {
-        res.send("Fluffy: <img src='/fluffy.gif' style='width:250px;'>");
-    }
-    else if (cat == 2) {
-        res.send("Socks: <img src='/socks.gif' style='width:250px;'>");
-    }
-    else {
-        res.send("Invalid cat id: "+cat);
-    }
-});
-
 
 app.use(express.static(__dirname + "/public"));
 
